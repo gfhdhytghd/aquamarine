@@ -16,6 +16,9 @@ using namespace Hyprutils::Memory;
 using namespace Hyprutils::Math;
 #define SP CSharedPointer
 
+// CTA-861.3 EOTF value, mirrors HDMI_EOTF_TRADITIONAL_GAMMA_SDR from the kernel's linux/hdmi.h (not exposed in uapi)
+static constexpr uint8_t HDMI_EOTF_TRADITIONAL_GAMMA_SDR = 0;
+
 // HW capabilites aren't checked. Should be handled by the drivers (and highly unlikely to get a format outside of bpc range)
 // https://drmdb.emersion.fr/properties/3233857728/max%20bpc
 static uint8_t getMaxBPC(uint64_t min, uint64_t max, uint32_t drmFormat) {
@@ -586,7 +589,13 @@ bool Aquamarine::CDRMAtomicImpl::prepareConnector(Hyprutils::Memory::CSharedPoin
     if ((data.modeset || (data.committed & COutputState::AQ_OUTPUT_STATE_HDR)) && data.hdrMetadata.has_value()) {
         if (!connector->props.values.hdr_output_metadata)
             connector->backend->backend->log(AQ_LOG_ERROR, "atomic drm: failed to commit hdr metadata: no HDR_OUTPUT_METADATA prop support");
-        else {
+        else if (data.hdrMetadata->hdmi_metadata_type1.eotf == HDMI_EOTF_TRADITIONAL_GAMMA_SDR) {
+            // SDR: clear the property instead of sending an SDR DRM infoframe, see the KMS docs for HDR_OUTPUT_METADATA.
+            // Some sinks otherwise stay in their HDR picture mode.
+            data.atomic.hdrBlob = 0;
+            data.atomic.hdrd    = true;
+            TRACE(connector->backend->backend->log(AQ_LOG_TRACE, "atomic drm: clearing hdr metadata"));
+        } else {
             if (drmModeCreatePropertyBlob(connector->backend->gpu->fd, &data.hdrMetadata.value(), sizeof(hdr_output_metadata), &data.atomic.hdrBlob)) {
                 connector->backend->backend->log(AQ_LOG_ERROR, "atomic drm: failed to create a hdr metadata blob");
                 data.atomic.hdrBlob = 0;
