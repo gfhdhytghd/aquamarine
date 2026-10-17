@@ -9,11 +9,14 @@
 #include <sstream>
 #include <optional>
 #include "Shared.hpp"
+#include "../ColorPipeline.hpp"
+#include <hyprutils/utils/ScopeGuard.hpp>
 #include "aquamarine/output/Output.hpp"
 
 using namespace Aquamarine;
 using namespace Hyprutils::Memory;
 using namespace Hyprutils::Math;
+using namespace Hyprutils::Utils;
 #define SP CSharedPointer
 
 // CTA-861.3 EOTF value, mirrors HDMI_EOTF_TRADITIONAL_GAMMA_SDR from the kernel's linux/hdmi.h (not exposed in uapi)
@@ -277,10 +280,16 @@ void Aquamarine::CDRMAtomicRequest::addConnector(Hyprutils::Memory::CSharedPoint
             }
         }
 
-        if (connector->props.values.Colorspace && connector->colorspace.values.BT2020_RGB) {
-            newColorspace = STATE.wideColorGamut ? connector->colorspace.values.BT2020_RGB : connector->colorspace.values.Default;
-            if (forceConnProps || connector->atomic.colorspace != newColorspace)
-                add(connector->id, connector->props.values.Colorspace, newColorspace);
+        if (connector->props.values.Colorspace) {
+            const auto& supported = connector->supportedColorspaces;
+            const auto  selected =
+                std::find_if(supported.begin(), supported.end(), [&STATE](const auto& entry) { return entry.name == (STATE.wideColorGamut ? "BT2020_RGB" : "Default"); });
+            if (selected != supported.end()) {
+                newColorspace = selected->value;
+                if (forceConnProps || connector->atomic.colorspace != newColorspace)
+                    add(connector->id, connector->props.values.Colorspace, newColorspace);
+            } else
+                newColorspace = connector->atomic.colorspace;
         }
 
         if (connector->props.values.hdr_output_metadata && data.atomic.hdrd)
@@ -423,45 +432,38 @@ void Aquamarine::CDRMAtomicRequest::destroyBlob(uint32_t id) {
         backend->log(AQ_LOG_ERROR, "atomic drm request: failed to destroy a blob");
 }
 
-void Aquamarine::CDRMAtomicRequest::commitBlob(uint32_t* current, uint32_t next) {
-    if (*current == next)
-        return;
-    destroyBlob(*current);
-    *current = next;
-}
-
-void Aquamarine::CDRMAtomicRequest::rollbackBlob(uint32_t* current, uint32_t next) {
-    if (*current == next)
-        return;
-    destroyBlob(next);
-}
-
 void Aquamarine::CDRMAtomicRequest::rollback(SDRMConnectorCommitData& data) {
     if (!conn)
         return;
-
-    conn->crtc->atomic.ownModeID = true;
-    if (data.atomic.blobbed)
-        rollbackBlob(&conn->crtc->atomic.modeID, data.atomic.modeBlob);
-    rollbackBlob(&conn->crtc->atomic.gammaLut, data.atomic.gammaLut);
-    rollbackBlob(&conn->crtc->atomic.ctm, data.atomic.ctmBlob);
-    rollbackBlob(&conn->crtc->atomic.hdr, data.atomic.hdrBlob);
+    const auto destroy = [this](uint32_t id) { destroyBlob(id); };
+    ColorPipeline::finishBlob(conn->crtc->atomic.modeID, data.atomic.modeBlob, data.modeset, false, destroy);
+    ColorPipeline::finishBlob(conn->crtc->atomic.gammaLut, data.atomic.gammaLut, data.atomic.gammad, false, destroy);
+    ColorPipeline::finishBlob(conn->crtc->atomic.degammaLut, data.atomic.degammaLut, data.atomic.degammad, false, destroy);
+    ColorPipeline::finishBlob(conn->crtc->atomic.ctm, data.atomic.ctmBlob, data.atomic.ctmd, false, destroy);
+    ColorPipeline::finishBlob(conn->crtc->atomic.hdr, data.atomic.hdrBlob, data.atomic.hdrd, false, destroy);
     destroyBlob(data.atomic.fbDamage);
 }
 
 void Aquamarine::CDRMAtomicRequest::apply(SDRMConnectorCommitData& data) {
     if (!conn)
         return;
-
-    if (!conn->crtc->atomic.ownModeID)
+    // TEST_ONLY accepts no kernel state and must release only the candidate blobs.
+    if (data.test) {
+        rollback(data);
+        return;
+    }
+    if (data.atomic.blobbed && !conn->crtc->atomic.ownModeID)
         conn->crtc->atomic.modeID = 0;
-
-    conn->crtc->atomic.ownModeID = true;
+    const auto destroy = [this](uint32_t id) { destroyBlob(id); };
+    ColorPipeline::finishBlob(conn->crtc->atomic.modeID, data.atomic.modeBlob, data.modeset, data.atomic.blobbed, destroy);
     if (data.atomic.blobbed)
-        commitBlob(&conn->crtc->atomic.modeID, data.atomic.modeBlob);
-    commitBlob(&conn->crtc->atomic.gammaLut, data.atomic.gammaLut);
-    commitBlob(&conn->crtc->atomic.ctm, data.atomic.ctmBlob);
-    commitBlob(&conn->crtc->atomic.hdr, data.atomic.hdrBlob);
+        conn->crtc->atomic.ownModeID = true;
+    // Disabled CRTCs don't receive color properties in addConnector; release the candidates without adopting them.
+    const bool colorApplied = data.enabled && data.mainFB;
+    ColorPipeline::finishBlob(conn->crtc->atomic.gammaLut, data.atomic.gammaLut, data.atomic.gammad, colorApplied, destroy);
+    ColorPipeline::finishBlob(conn->crtc->atomic.degammaLut, data.atomic.degammaLut, data.atomic.degammad, colorApplied, destroy);
+    ColorPipeline::finishBlob(conn->crtc->atomic.ctm, data.atomic.ctmBlob, data.atomic.ctmd, colorApplied, destroy);
+    ColorPipeline::finishBlob(conn->crtc->atomic.hdr, data.atomic.hdrBlob, data.atomic.hdrd, colorApplied, destroy);
     destroyBlob(data.atomic.fbDamage);
 }
 
@@ -500,7 +502,7 @@ void Aquamarine::CDRMAtomicImpl::finalizeAsync(CDRMAtomicRequest& request, SP<SD
     connector->atomic.colorRange  = data.outputState.colorRange;
     connector->atomic.vrrEnabled  = data.outputState.adaptiveSync;
     connector->output->vrrActive  = data.outputState.adaptiveSync;
-    if (data.atomic.ctmd)
+    if (data.atomic.ctmd && data.enabled && data.mainFB)
         connector->crtc->atomic.ctmStateKnown = true;
 }
 
@@ -508,6 +510,27 @@ bool Aquamarine::CDRMAtomicImpl::prepareConnector(Hyprutils::Memory::CSharedPoin
     const auto& STATE  = data.outputState;
     const bool  enable = data.enabled;
     const auto& MODE   = STATE.mode ? STATE.mode : STATE.customMode;
+
+    const bool  updateGamma   = (data.modeset && connector->crtc->props.values.gamma_lut) || (data.committed & COutputState::AQ_OUTPUT_STATE_GAMMA_LUT);
+    const bool  updateDegamma = (data.modeset && connector->crtc->props.values.degamma_lut) || (data.committed & COutputState::AQ_OUTPUT_STATE_DEGAMMA_LUT);
+    if ((updateGamma && !ColorPipeline::validLut(STATE.gammaLut, connector->output->getGammaSize())) ||
+        (updateDegamma && !ColorPipeline::validLut(STATE.degammaLut, connector->output->getDeGammaSize()))) {
+        connector->backend->backend->log(AQ_LOG_ERROR, "atomic drm: unsupported LUT or LUT size mismatch");
+        return false;
+    }
+    if (data.ctm.has_value() && !connector->crtc->props.values.ctm && !(data.ctm.value() == Mat3x3::identity())) {
+        connector->backend->backend->log(AQ_LOG_ERROR, "atomic drm: unsupported CTM");
+        return false;
+    }
+
+    bool        prepared = false;
+    CScopeGuard cleanup([&] {
+        if (prepared)
+            return;
+        CDRMAtomicRequest request(backend);
+        request.setConnector(connector);
+        request.rollback(data);
+    });
 
     if (data.modeset) {
         if (!enable)
@@ -525,65 +548,55 @@ bool Aquamarine::CDRMAtomicImpl::prepareConnector(Hyprutils::Memory::CSharedPoin
     }
 
     auto prepareGammaBlob = [connector](uint32_t prop, const std::vector<uint16_t>& gammaLut, uint32_t* blobId) -> bool {
-        if (!prop) // TODO: allow this with legacy gamma, perhaps.
-            connector->backend->backend->log(AQ_LOG_ERROR, "atomic drm: failed to commit gamma: no gamma_lut prop");
-        else if (gammaLut.empty()) {
+        // Without the property there is nothing to disable, addConnector skips it.
+        if (!prop) {
+            *blobId = 0;
+            return gammaLut.empty();
+        }
+        if (gammaLut.empty()) {
             *blobId = 0;
             return true;
-        } else {
-            std::vector<drm_color_lut> lut;
-            lut.resize(gammaLut.size() / 3); // [r,g,b]+
-
-            for (size_t i = 0; i < lut.size(); ++i) {
-                lut.at(i).red      = gammaLut.at(i * 3 + 0);
-                lut.at(i).green    = gammaLut.at(i * 3 + 1);
-                lut.at(i).blue     = gammaLut.at(i * 3 + 2);
-                lut.at(i).reserved = 0;
-            }
-
-            if (drmModeCreatePropertyBlob(connector->backend->gpu->fd, lut.data(), lut.size() * sizeof(drm_color_lut), blobId)) {
-                connector->backend->backend->log(AQ_LOG_ERROR, "atomic drm: failed to create a gamma blob");
-                *blobId = 0;
-            } else
-                return true;
         }
-
-        return false;
+        const auto lut = ColorPipeline::packLut(gammaLut);
+        if (drmModeCreatePropertyBlob(connector->backend->gpu->fd, lut.data(), lut.size() * sizeof(drm_color_lut), blobId)) {
+            connector->backend->backend->log(AQ_LOG_ERROR, "atomic drm: failed to create a LUT blob");
+            *blobId = 0;
+            return false;
+        }
+        return true;
     };
 
-    // re-send gamma/degamma on modeset so a previous compositor's lut does not
-    // bleed into our session. an empty STATE.gammaLut produces a zero blob, which
-    // clears the kernel state. only ride the modeset path when the prop actually
-    // exists, otherwise we'd log a spurious "no gamma_lut prop" error per modeset.
-    // (see #127)
-    if ((data.modeset && connector->crtc->props.values.gamma_lut) || (data.committed & COutputState::AQ_OUTPUT_STATE_GAMMA_LUT))
+    // Re-send LUTs on modeset, including zero to clear a previous compositor's state.
+    if (updateGamma) {
         data.atomic.gammad = prepareGammaBlob(connector->crtc->props.values.gamma_lut, STATE.gammaLut, &data.atomic.gammaLut);
-
-    if ((data.modeset && connector->crtc->props.values.degamma_lut) || (data.committed & COutputState::AQ_OUTPUT_STATE_DEGAMMA_LUT))
+        if (!data.atomic.gammad)
+            return false;
+    }
+    if (updateDegamma) {
         data.atomic.degammad = prepareGammaBlob(connector->crtc->props.values.degamma_lut, STATE.degammaLut, &data.atomic.degammaLut);
+        if (!data.atomic.degammad)
+            return false;
+    }
 
-    if (data.ctm.has_value()) {
-        if (!connector->crtc->props.values.ctm)
-            connector->backend->backend->log(AQ_LOG_ERROR, "atomic drm: failed to commit ctm: no ctm prop support");
-        else {
-            static auto doubleToS3132Fixed = [](const double val) -> uint64_t {
-                const uint64_t result = std::abs(val) * (1ULL << 32);
-                if (val < 0)
-                    return result | 1ULL << 63;
-                return result;
-            };
+    if (data.ctm.has_value() && connector->crtc->props.values.ctm) {
+        static auto doubleToS3132Fixed = [](const double val) -> uint64_t {
+            const uint64_t result = std::abs(val) * (1ULL << 32);
+            if (val < 0)
+                return result | 1ULL << 63;
+            return result;
+        };
 
-            drm_color_ctm ctm = {0};
-            for (size_t i = 0; i < 9; ++i) {
-                ctm.matrix[i] = doubleToS3132Fixed(data.ctm->getMatrix()[i]);
-            }
-
-            if (drmModeCreatePropertyBlob(connector->backend->gpu->fd, &ctm, sizeof(drm_color_ctm), &data.atomic.ctmBlob)) {
-                connector->backend->backend->log(AQ_LOG_ERROR, "atomic drm: failed to create a ctm blob");
-                data.atomic.ctmBlob = 0;
-            } else
-                data.atomic.ctmd = true;
+        drm_color_ctm ctm = {0};
+        for (size_t i = 0; i < 9; ++i) {
+            ctm.matrix[i] = doubleToS3132Fixed(data.ctm->getMatrix()[i]);
         }
+
+        if (drmModeCreatePropertyBlob(connector->backend->gpu->fd, &ctm, sizeof(drm_color_ctm), &data.atomic.ctmBlob)) {
+            connector->backend->backend->log(AQ_LOG_ERROR, "atomic drm: failed to create a ctm blob");
+            data.atomic.ctmBlob = 0;
+            return false;
+        } else
+            data.atomic.ctmd = true;
     }
 
     if ((data.modeset || (data.committed & COutputState::AQ_OUTPUT_STATE_HDR)) && data.hdrMetadata.has_value()) {
@@ -629,6 +642,7 @@ bool Aquamarine::CDRMAtomicImpl::prepareConnector(Hyprutils::Memory::CSharedPoin
         }
     }
 
+    prepared = true;
     return true;
 }
 
@@ -684,7 +698,7 @@ bool Aquamarine::CDRMAtomicImpl::commit(Hyprutils::Memory::CSharedPointer<SDRMCo
                 connector->atomic.crtcID      = data.atomic.crtcID;
                 connector->atomic.propsCached = true;
                 connector->atomic.colorRange  = data.outputState.colorRange;
-                if (data.atomic.ctmd)
+                if (data.atomic.ctmd && data.enabled && data.mainFB)
                     connector->crtc->atomic.ctmStateKnown = true;
 
                 if (data.mainFB && data.enabled && (flags & DRM_MODE_PAGE_FLIP_EVENT))
@@ -695,6 +709,8 @@ bool Aquamarine::CDRMAtomicImpl::commit(Hyprutils::Memory::CSharedPointer<SDRMCo
             request2.rollback(data);
         }
 
+        if (data.test)
+            connector->maxBpcFailed = false;
         return ok;
     }
 
@@ -733,7 +749,7 @@ bool Aquamarine::CDRMAtomicImpl::commit(Hyprutils::Memory::CSharedPointer<SDRMCo
             connector->atomic.crtcID      = data.atomic.crtcID;
             connector->atomic.propsCached = true;
             connector->atomic.colorRange  = data.outputState.colorRange;
-            if (data.atomic.ctmd)
+            if (data.atomic.ctmd && data.enabled && data.mainFB)
                 connector->crtc->atomic.ctmStateKnown = true;
         }
     } else

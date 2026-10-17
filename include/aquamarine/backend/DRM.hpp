@@ -195,11 +195,12 @@ namespace Aquamarine {
         } legacy;
 
         struct {
-            bool     ownModeID = false;
-            uint32_t modeID    = 0;
-            uint32_t gammaLut  = 0;
-            uint32_t ctm       = 0;
-            uint32_t hdr       = 0;
+            bool     ownModeID  = false;
+            uint32_t modeID     = 0;
+            uint32_t gammaLut   = 0;
+            uint32_t degammaLut = 0;
+            uint32_t ctm        = 0;
+            uint32_t hdr        = 0;
             // true once a real commit has made the kernel CTM match our state.
             bool ctmStateKnown = false;
         } atomic;
@@ -245,6 +246,8 @@ namespace Aquamarine {
         virtual std::optional<std::chrono::steady_clock::time_point>      nextVBlank() const;
         virtual size_t                                                    getGammaSize();
         virtual size_t                                                    getDeGammaSize();
+        virtual bool                                                      supportsCTM() const;
+        virtual std::vector<SColorspace>                                  getSupportedColorspaces() const;
         virtual std::vector<SDRMFormat>                                   getRenderFormats();
         virtual bool                                                      pendingPageFlip();
         virtual bool                                                      pendingIdleFrame();
@@ -444,7 +447,8 @@ namespace Aquamarine {
             } values;
             uint32_t props[3] = {0};
         };
-        UDRMConnectorColorspace colorspace;
+        UDRMConnectorColorspace           colorspace;
+        std::vector<IOutput::SColorspace> supportedColorspaces;
     };
 
     class IDRMImplementation {

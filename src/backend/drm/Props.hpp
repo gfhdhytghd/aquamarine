@@ -4,7 +4,7 @@
 
 namespace Aquamarine {
     bool  getDRMConnectorProps(int fd, uint32_t id, SDRMConnector::UDRMConnectorProps* out);
-    bool  getDRMConnectorColorspace(int fd, uint32_t id, SDRMConnector::UDRMConnectorColorspace* out);
+    bool  getDRMConnectorColorspace(int fd, uint32_t id, SDRMConnector::UDRMConnectorColorspace* out, std::vector<IOutput::SColorspace>* supported);
     bool  getDRMCRTCProps(int fd, uint32_t id, SDRMCRTC::UDRMCRTCProps* out);
     bool  getDRMPlaneProps(int fd, uint32_t id, SDRMPlane::UDRMPlaneProps* out);
     bool  getDRMPlaneColorRange(int fd, uint32_t id, SDRMPlane::UDRMPlaneColorRange* out);

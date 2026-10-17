@@ -66,6 +66,14 @@ size_t Aquamarine::IOutput::getDeGammaSize() {
     return 0;
 }
 
+bool Aquamarine::IOutput::supportsCTM() const {
+    return false;
+}
+
+std::vector<Aquamarine::IOutput::SColorspace> Aquamarine::IOutput::getSupportedColorspaces() const {
+    return {};
+}
+
 bool Aquamarine::IOutput::destroy() {
     return false;
 }

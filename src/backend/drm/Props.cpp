@@ -135,8 +135,27 @@ namespace Aquamarine {
         return scanProperties(fd, id, DRM_MODE_OBJECT_CONNECTOR, out->props, connector_info, sizeof(connector_info) / sizeof(connector_info[0]));
     }
 
-    bool getDRMConnectorColorspace(int fd, uint32_t id, SDRMConnector::UDRMConnectorColorspace* out) {
-        return scanPropertyEnum(fd, id, out->props, colorspace_info, sizeof(colorspace_info) / sizeof(colorspace_info[0]));
+    bool getDRMConnectorColorspace(int fd, uint32_t id, SDRMConnector::UDRMConnectorColorspace* out, std::vector<IOutput::SColorspace>* supported) {
+        *out = {};
+        supported->clear();
+        if (!id)
+            return false;
+        auto* prop = drmModeGetProperty(fd, id);
+        if (!prop)
+            return false;
+        if (!(prop->flags & DRM_MODE_PROP_ENUM)) {
+            drmModeFreeProperty(prop);
+            return false;
+        }
+        for (int i = 0; i < prop->count_enums; ++i) {
+            const auto& entry = prop->enums[i];
+            supported->push_back({.name = entry.name, .value = entry.value});
+            const auto* p = static_cast<const prop_info*>(bsearch(entry.name, colorspace_info, std::size(colorspace_info), sizeof(colorspace_info[0]), comparePropInfo));
+            if (p)
+                out->props[p->index] = static_cast<uint32_t>(entry.value);
+        }
+        drmModeFreeProperty(prop);
+        return true;
     }
 
     bool getDRMCRTCProps(int fd, uint32_t id, SDRMCRTC::UDRMCRTCProps* out) {

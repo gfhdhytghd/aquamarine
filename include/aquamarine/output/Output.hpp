@@ -111,6 +111,9 @@ namespace Aquamarine {
             friend class COutputState;
         };
 
+        // LUT setters take interleaved [r,g,b]+, exactly getGammaSize()/getDeGammaSize() entries; empty disables (legacy gamma restores identity).
+        // One gamma slot: last setter wins, including gamma-control/VCGT. The compositor must compose ramps or arbitrate ownership.
+
         const SInternalState& state();
         const SInternalState& state() const;
         CSnapshot             snapshot() const;
@@ -235,6 +238,14 @@ namespace Aquamarine {
             bool                               supportsBT2020 = false;
         };
 
+        struct SColorspace {
+            std::string name;
+            uint64_t    value = 0; // Connector-specific KMS enum value, including valid value zero.
+        };
+
+        // LUT sizes: zero means unavailable on the current backend/CRTC. Re-query after output/CRTC reconfiguration.
+        // Colorspaces: empty when absent or unavailable; EDID support is separate from connector property support.
+
         virtual bool                                                      commit()           = 0;
         virtual bool                                                      test()             = 0;
         virtual Hyprutils::Memory::CSharedPointer<IBackendImplementation> getBackend()       = 0;
@@ -249,6 +260,8 @@ namespace Aquamarine {
         virtual void                                                      scheduleFrame(const scheduleFrameReason reason = AQ_SCHEDULE_UNKNOWN);
         virtual size_t                                                    getGammaSize();
         virtual size_t                                                    getDeGammaSize();
+        virtual bool                                                      supportsCTM() const;
+        virtual std::vector<SColorspace>                                  getSupportedColorspaces() const;
         virtual bool                                                      destroy(); // not all backends allow this!!!
         virtual bool                                                      pendingPageFlip()  = 0;
         virtual bool                                                      pendingIdleFrame() = 0;

@@ -1,6 +1,7 @@
 #include "aquamarine/output/Output.hpp"
 #include <aquamarine/backend/drm/Legacy.hpp>
 #include <cstring>
+#include "../ColorPipeline.hpp"
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <sys/mman.h>
@@ -84,7 +85,21 @@ bool Aquamarine::CDRMLegacyImpl::commitInternal(Hyprutils::Memory::CSharedPointe
         connector->backend->backend->log(AQ_LOG_DEBUG, std::format("legacy drm: connector {} vrr -> {}", connector->id, STATE.adaptiveSync));
     }
 
-    // TODO: gamma
+    if ((data.committed & COutputState::AQ_OUTPUT_STATE_GAMMA_LUT) || (data.modeset && enable && connector->output->getGammaSize() > 0)) {
+        const size_t          size = connector->output->getGammaSize();
+        std::vector<uint16_t> red(size), green(size), blue(size);
+        for (size_t i = 0; i < size; ++i) {
+            // Legacy has no disable operation: an empty ramp restores an identity LUT.
+            const auto identity = static_cast<uint16_t>(size == 1 ? 0 : (static_cast<uint64_t>(i) * UINT16_MAX) / (size - 1));
+            red[i]              = STATE.gammaLut.empty() ? identity : STATE.gammaLut[i * 3];
+            green[i]            = STATE.gammaLut.empty() ? identity : STATE.gammaLut[i * 3 + 1];
+            blue[i]             = STATE.gammaLut.empty() ? identity : STATE.gammaLut[i * 3 + 2];
+        }
+        if (drmModeCrtcSetGamma(connector->backend->gpu->fd, connector->crtc->id, static_cast<uint32_t>(size), red.data(), green.data(), blue.data())) {
+            connector->backend->backend->log(AQ_LOG_ERROR, "legacy drm: failed to set gamma");
+            return false;
+        }
+    }
 
     if (data.cursorFB && connector->crtc->cursor && data.cursorVisible && enable &&
         (data.committed & COutputState::AQ_OUTPUT_STATE_CURSOR_SHAPE || data.committed & COutputState::AQ_OUTPUT_STATE_CURSOR_POS)) {
@@ -144,14 +159,18 @@ bool Aquamarine::CDRMLegacyImpl::commitInternal(Hyprutils::Memory::CSharedPointe
 }
 
 bool Aquamarine::CDRMLegacyImpl::testInternal(Hyprutils::Memory::CSharedPointer<SDRMConnector> connector, SDRMConnectorCommitData& data) {
-    return true; // TODO: lol
+    if ((data.committed & COutputState::AQ_OUTPUT_STATE_DEGAMMA_LUT) && !data.outputState.degammaLut.empty())
+        return false; // No legacy degamma API, disabling it is a no-op.
+    if ((data.committed & COutputState::AQ_OUTPUT_STATE_GAMMA_LUT) || (data.modeset && data.enabled && connector->output->getGammaSize() > 0))
+        return ColorPipeline::validLut(data.outputState.gammaLut, connector->output->getGammaSize());
+    return true; // Other legacy state still has no kernel TEST_ONLY support.
 }
 
 bool Aquamarine::CDRMLegacyImpl::commit(Hyprutils::Memory::CSharedPointer<SDRMConnector> connector, SDRMConnectorCommitData& data) {
     if (!testInternal(connector, data))
         return false;
 
-    return commitInternal(connector, data);
+    return data.test || commitInternal(connector, data);
 }
 
 bool Aquamarine::CDRMLegacyImpl::reset() {

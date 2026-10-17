@@ -70,7 +70,7 @@ target_include_directories(
   PUBLIC "./include"
   PRIVATE "./src" "./src/include" "./protocols" "${CMAKE_BINARY_DIR}")
 set_target_properties(aquamarine PROPERTIES VERSION ${AQUAMARINE_VERSION}
-                                            SOVERSION 14)
+                                            SOVERSION 15)
 if(CMAKE_SYSTEM_NAME MATCHES "OpenBSD")
   target_link_libraries(aquamarine OpenGL::EGL OpenGL::GLES3 PkgConfig::deps Threads::Threads)
 else()
@@ -170,6 +170,12 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests
   COMMAND commitThread "commitThread")
 add_dependencies(tests commitThread)
+
+add_executable(colorPipeline "tests/ColorPipeline.cpp")
+target_include_directories(colorPipeline PRIVATE "./src/backend/drm")
+target_link_libraries(colorPipeline PRIVATE PkgConfig::deps aquamarine)
+add_test(NAME "colorPipeline" COMMAND colorPipeline)
+add_dependencies(tests colorPipeline)
 
 # Installation
 install(TARGETS aquamarine)

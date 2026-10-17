@@ -147,6 +147,10 @@ int main() {
     EXPECT(output.test(), true);
     EXPECT(!!(output.state->state().committed & COutputState::AQ_OUTPUT_STATE_ENABLED), true);
 
+    EXPECT(output.getGammaSize(), 0U);
+    EXPECT(output.getDeGammaSize(), 0U);
+    EXPECT(output.supportsCTM(), false);
+    EXPECT(output.getSupportedColorspaces().empty(), true);
     EXPECT(output.hasCursorPlane(), false);
     EXPECT(output.nextVBlank().has_value(), false);
     EXPECT(output.commitCapabilities(), 0U);

@@ -1,5 +1,6 @@
 
 #include "aquamarine/output/Output.hpp"
+#include "ColorPipeline.hpp"
 #include <algorithm>
 #include <aquamarine/backend/DRM.hpp>
 #include <aquamarine/backend/drm/Legacy.hpp>
@@ -386,6 +387,19 @@ Aquamarine::CDRMBackend::~CDRMBackend() {
     for (auto& conn : connectors) {
         conn->disconnect();
         conn.reset();
+    }
+
+    // Blobs belong to the CRTC, not to a particular connector/output. Drain commits before releasing them.
+    for (auto& crtc : crtcs) {
+        const auto destroy = [this](uint32_t blob) {
+            if (blob)
+                drmModeDestroyPropertyBlob(gpu->fd, blob);
+        };
+        for (auto* blob : {&crtc->atomic.gammaLut, &crtc->atomic.degammaLut, &crtc->atomic.ctm, &crtc->atomic.hdr})
+            ColorPipeline::finishBlob(*blob, 0, true, true, destroy);
+        if (crtc->atomic.ownModeID && crtc->atomic.modeID)
+            drmModeDestroyPropertyBlob(gpu->fd, crtc->atomic.modeID);
+        crtc->atomic.modeID = 0;
     }
 
     if (rendererState.allocator)
@@ -1768,8 +1782,7 @@ SP<SDRMCRTC> Aquamarine::SDRMConnector::getCurrentCRTC(const drmModeConnector* c
 bool Aquamarine::SDRMConnector::init(drmModeConnector* connector) {
     if (!getDRMConnectorProps(backend->gpu->fd, id, &props))
         return false;
-    if (props.values.Colorspace)
-        getDRMConnectorColorspace(backend->gpu->fd, props.values.Colorspace, &colorspace);
+    getDRMConnectorColorspace(backend->gpu->fd, props.values.Colorspace, &colorspace, &supportedColorspaces);
 
     auto name = drmModeGetConnectorTypeName(connector->connector_type);
     if (!name)
@@ -3189,43 +3202,33 @@ Aquamarine::IOutput::SCommitSubmission Aquamarine::CDRMOutput::commitAsync(const
 }
 
 size_t Aquamarine::CDRMOutput::getGammaSize() {
-    if (!backend->atomic) {
-        backend->log(AQ_LOG_ERROR, "No support for gamma on the legacy iface");
+    if (!backend || !connector || !connector->crtc)
         return 0;
-    }
-
-    if (!connector->crtc) {
-        backend->log(AQ_LOG_ERROR, "Can't get gamma size: no crtc");
+    if (!backend->atomic)
+        return static_cast<size_t>(std::max(connector->crtc->legacy.gammaSize, 0));
+    if (!connector->crtc->props.values.gamma_lut || !connector->crtc->props.values.gamma_lut_size)
         return 0;
-    }
-
     uint64_t size = 0;
-    if (!getDRMProp(backend->gpu->fd, connector->crtc->id, connector->crtc->props.values.gamma_lut_size, &size)) {
-        backend->log(AQ_LOG_ERROR, "Couldn't get the gamma_size prop");
+    if (!getDRMProp(backend->gpu->fd, connector->crtc->id, connector->crtc->props.values.gamma_lut_size, &size))
         return 0;
-    }
-
     return size;
 }
 
 size_t Aquamarine::CDRMOutput::getDeGammaSize() {
-    if (!backend->atomic) {
-        backend->log(AQ_LOG_ERROR, "No support for gamma on the legacy iface");
+    if (!backend || !backend->atomic || !connector || !connector->crtc || !connector->crtc->props.values.degamma_lut || !connector->crtc->props.values.degamma_lut_size)
         return 0;
-    }
-
-    if (!connector->crtc) {
-        backend->log(AQ_LOG_ERROR, "Can't get degamma size: no crtc");
-        return 0;
-    }
-
     uint64_t size = 0;
-    if (!getDRMProp(backend->gpu->fd, connector->crtc->id, connector->crtc->props.values.degamma_lut_size, &size)) {
-        backend->log(AQ_LOG_ERROR, "Couldn't get the degamma_size prop");
+    if (!getDRMProp(backend->gpu->fd, connector->crtc->id, connector->crtc->props.values.degamma_lut_size, &size))
         return 0;
-    }
-
     return size;
+}
+
+bool Aquamarine::CDRMOutput::supportsCTM() const {
+    return backend && backend->atomic && connector && connector->crtc && connector->crtc->props.values.ctm;
+}
+
+std::vector<Aquamarine::IOutput::SColorspace> Aquamarine::CDRMOutput::getSupportedColorspaces() const {
+    return backend && backend->atomic && connector ? connector->supportedColorspaces : std::vector<SColorspace>{};
 }
 
 std::vector<SDRMFormat> Aquamarine::CDRMOutput::getRenderFormats() {
