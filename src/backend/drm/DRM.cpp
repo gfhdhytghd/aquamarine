@@ -2763,7 +2763,9 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
         }
     }
 
-    if (COMMITTED & COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_HDR)
+    // The first commit also writes the metadata the compositor didn't touch: the previous DRM master (e.g. a crashed
+    // compositor) may have left HDR signalling behind, which our zero-initialized state doesn't know about.
+    if ((COMMITTED & COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_HDR) || !connector->atomic.propsCached)
         data.hdrMetadata = STATE.hdrMetadata;
 
     data.blocking  = BLOCKING || formatMismatch;

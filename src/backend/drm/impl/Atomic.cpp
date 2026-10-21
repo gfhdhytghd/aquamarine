@@ -599,7 +599,7 @@ bool Aquamarine::CDRMAtomicImpl::prepareConnector(Hyprutils::Memory::CSharedPoin
             data.atomic.ctmd = true;
     }
 
-    if ((data.modeset || (data.committed & COutputState::AQ_OUTPUT_STATE_HDR)) && data.hdrMetadata.has_value()) {
+    if ((data.modeset || (data.committed & COutputState::AQ_OUTPUT_STATE_HDR) || !connector->atomic.propsCached) && data.hdrMetadata.has_value()) {
         if (!connector->props.values.hdr_output_metadata)
             connector->backend->backend->log(AQ_LOG_ERROR, "atomic drm: failed to commit hdr metadata: no HDR_OUTPUT_METADATA prop support");
         else if (data.hdrMetadata->hdmi_metadata_type1.eotf == HDMI_EOTF_TRADITIONAL_GAMMA_SDR) {
