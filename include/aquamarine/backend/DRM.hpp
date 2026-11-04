@@ -552,6 +552,7 @@ namespace Aquamarine {
         std::chrono::microseconds                                     commitLeadTime = std::chrono::microseconds{2000};
 
         Hyprutils::Memory::CSharedPointer<CDRMDumbAllocator>          dumbAllocator;
+        bool                                                          cpuCopyFallback  = false;
 
         bool                                                          atomic = false;
 
