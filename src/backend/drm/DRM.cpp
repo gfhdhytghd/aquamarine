@@ -1962,7 +1962,7 @@ IOutput::SParsedEDID Aquamarine::SDRMConnector::parseEDID(std::vector<uint8_t> d
         TRACE(backend->backend->log(AQ_LOG_TRACE,
                                     std::format("EDID: chromaticity coords {},{} {},{} {},{} {},{}", parsed.chromaticityCoords->red.x, parsed.chromaticityCoords->red.y,
                                                 parsed.chromaticityCoords->green.x, parsed.chromaticityCoords->green.y, parsed.chromaticityCoords->blue.x,
-                                                parsed.chromaticityCoords->blue.y, parsed.chromaticityCoords->white.y, parsed.chromaticityCoords->white.y)));
+                                                parsed.chromaticityCoords->blue.y, parsed.chromaticityCoords->white.x, parsed.chromaticityCoords->white.y)));
     }
 
     const auto* hdr_static_metadata = di_info_get_hdr_static_metadata(info);
@@ -2388,8 +2388,6 @@ bool Aquamarine::CDRMOutput::test() {
     const auto QUEUE_KEY = connector->crtc->id;
     if (pendingAsyncCommit)
         backend->cancelAsyncOutput(this, true);
-    if (pendingAsyncCommit)
-        return false;
     if (!backend->pauseCommitQueue(QUEUE_KEY))
         return false;
     CScopeGuard resume([this, QUEUE_KEY] { backend->resumeCommitQueue(QUEUE_KEY); });
