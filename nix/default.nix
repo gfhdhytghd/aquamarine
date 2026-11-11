@@ -12,7 +12,6 @@
   libGL,
   libinput,
   libgbm,
-  pixman,
   pkg-config,
   seatd,
   udev,
@@ -54,19 +53,21 @@ customStdenv.mkDerivation {
     pkg-config
   ];
 
+  propagatedBuildInputs = [
+    (hyprutils.override { inherit withMold; })
+    libdrm
+    wayland
+  ];
+
   buildInputs = [
     hwdata
-    (hyprutils.override { inherit withMold; })
     libdisplay-info
-    libdrm
     libffi
     libGL
     libinput
     libgbm
-    pixman
     seatd
     udev
-    wayland
     wayland-protocols
     wayland-scanner
   ];
