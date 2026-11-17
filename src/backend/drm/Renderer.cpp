@@ -390,6 +390,11 @@ bool CDRMRenderer::initDRMFormats() {
 }
 
 Aquamarine::CDRMRenderer::~CDRMRenderer() {
+    if (egl.lastBlitSync)
+        proc.eglDestroySyncKHR(egl.display, egl.lastBlitSync);
+    if (egl.lastBlitSyncFD >= 0)
+        close(egl.lastBlitSyncFD);
+
     if (egl.display)
         eglMakeCurrent(egl.display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 
@@ -665,11 +670,21 @@ CEglContextGuard::CEglContextGuard(const CDRMRenderer& renderer_) : renderer(ren
     savedEGLState.draw    = eglGetCurrentSurface(EGL_DRAW);
     savedEGLState.read    = eglGetCurrentSurface(EGL_READ);
 
-    if (!eglMakeCurrent(renderer.egl.display, EGL_NO_SURFACE, EGL_NO_SURFACE, renderer.egl.context))
-        renderer.backend->log(AQ_LOG_WARNING, "CDRMRenderer: setEGL eglMakeCurrent failed");
+    const bool alreadyCurrent = savedEGLState.display == renderer.egl.display && savedEGLState.context == renderer.egl.context && savedEGLState.draw == EGL_NO_SURFACE &&
+        savedEGLState.read == EGL_NO_SURFACE;
+
+    if (!alreadyCurrent) {
+        madeChange = eglMakeCurrent(renderer.egl.display, EGL_NO_SURFACE, EGL_NO_SURFACE, renderer.egl.context);
+
+        if (!madeChange)
+            renderer.backend->log(AQ_LOG_WARNING, "CDRMRenderer: setEGL eglMakeCurrent failed");
+    }
 }
 
 CEglContextGuard::~CEglContextGuard() {
+    if (!madeChange)
+        return; // Skip restore if we didn’t change anything
+
     EGLDisplay dpy = savedEGLState.display ? savedEGLState.display : renderer.egl.display;
 
     // egl can't handle this
@@ -788,9 +803,13 @@ CGLTex CDRMRenderer::glTex(Hyprutils::Memory::CSharedPointer<IBuffer> buffa) {
 
 constexpr GLenum PIXEL_BUFFER_FORMAT = GL_RGBA;
 
-bool             CDRMRenderer::readBuffer(Hyprutils::Memory::CSharedPointer<IBuffer> buf, std::span<uint8_t> out, GLenum format, uint32_t stride) {
+bool             CDRMRenderer::readBuffer(Hyprutils::Memory::CSharedPointer<IBuffer> buf, std::span<uint8_t> out, GLenum format, uint32_t stride, int waitFD) {
     CEglContextGuard eglContext(*this);
-    auto             att = buf->attachments.get<CDRMRendererBufferOutputAttachment>();
+    // Server-side waits only order commands in the current context, not the blitting GPU's context.
+    if (waitFD >= 0 && !CFileDescriptor::isReadable(waitFD))
+        waitOnSync(waitFD);
+
+    auto att = buf->attachments.get<CDRMRendererBufferOutputAttachment>();
     if (!att || att->renderer != self) {
         att = makeShared<CDRMRendererBufferOutputAttachment>(self, nullptr, 0, 0);
         buf->attachments.add(att);
@@ -1005,7 +1024,7 @@ CDRMRenderer::SBlitResult CDRMRenderer::blit(SP<IBuffer> from, SP<IBuffer> to, S
 
         if (!intermediateBuf.empty() && primaryRenderer) {
             // Note: this might modify from's output attachment
-            if (!primaryRenderer->readBuffer(from, intermediateBuf)) {
+            if (!primaryRenderer->readBuffer(from, intermediateBuf, PIXEL_BUFFER_FORMAT, 0, waitFD)) {
                 backend->log(AQ_LOG_ERROR, "EGL (blit): source readback failed for intermediate buffer");
                 return {};
             }
