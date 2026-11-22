@@ -1717,6 +1717,9 @@ bool Aquamarine::SDRMPlane::init(drmModePlane* plane) {
         drmModeFreePropertyBlob(blob);
     }
 
+    if (props.values.size_hints && type == DRM_PLANE_TYPE_CURSOR)
+        initSizeHints();
+
     for (size_t i = 0; i < backend->crtcs.size(); ++i) {
         uint32_t crtcBit = (1 << i);
         if (!(plane->possible_crtcs & crtcBit))
@@ -1735,6 +1738,30 @@ bool Aquamarine::SDRMPlane::init(drmModePlane* plane) {
     }
 
     return true;
+}
+
+void Aquamarine::SDRMPlane::initSizeHints() {
+    uint64_t blobID = 0;
+    if (!getDRMProp(backend->gpu->fd, id, props.values.size_hints, &blobID) || !blobID)
+        return;
+
+    auto blob = drmModeGetPropertyBlob(backend->gpu->fd, blobID);
+    if (!blob)
+        return;
+
+    const auto* hints = sc<const drm_plane_size_hint*>(blob->data);
+    const auto  count = blob->length / sizeof(drm_plane_size_hint);
+
+    for (size_t i = 0; i < count; ++i) {
+        const auto& hint = hints[i];
+        if (!hint.width || !hint.height)
+            continue;
+
+        sizeHints.sizes.emplace_back(hint.width, hint.height);
+        backend->backend->log(AQ_LOG_DEBUG, std::format("drm: Plane {} has size hint {}x{}", id, hint.width, hint.height));
+    }
+
+    drmModeFreePropertyBlob(blob);
 }
 
 SP<SDRMCRTC> Aquamarine::SDRMConnector::getCurrentCRTC(const drmModeConnector* connector) {
@@ -3067,6 +3094,13 @@ void Aquamarine::CDRMOutput::scheduleFrame(const scheduleFrameReason reason) {
 
 Vector2D Aquamarine::CDRMOutput::cursorPlaneSize() {
     return backend->drmProps.cursorSize;
+}
+
+const SCursorPlaneSizeHints& Aquamarine::CDRMOutput::cursorPlaneSizeHints() const {
+    if (!connector->crtc || !connector->crtc->cursor)
+        return IOutput::cursorPlaneSizeHints();
+
+    return connector->crtc->cursor->sizeHints;
 }
 
 bool Aquamarine::CDRMOutput::hasCursorPlane() const {
