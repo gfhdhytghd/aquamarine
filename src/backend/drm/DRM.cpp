@@ -50,19 +50,6 @@ using namespace Hyprutils::Memory;
 using namespace Hyprutils::Math;
 #define SP CSharedPointer
 
-static bool shouldSubmitCTM(SP<SDRMConnector> connector, const COutputState::SInternalState& state, bool modeset) {
-    if (state.committed & COutputState::AQ_OUTPUT_STATE_CTM)
-        return true;
-
-    if (!modeset)
-        return false;
-
-    if (!(state.ctm == Mat3x3::identity()))
-        return true;
-
-    return connector->crtc->props.values.ctm && !connector->crtc->atomic.ctmStateKnown;
-}
-
 Aquamarine::CDRMBackend::CDRMBackend(SP<CBackend> backend_) : backend(backend_) {
     listeners.sessionActivate = backend->session->events.changeActive.listen([this] {
         if (backend->session->active) {
@@ -402,6 +389,11 @@ Aquamarine::CDRMBackend::~CDRMBackend() {
         crtc->atomic.modeID = 0;
     }
 
+    for (const auto& plane : planes) {
+        if (plane->props.values.color_range)
+            forgetDRMPlaneColorRange(*plane);
+    }
+
     if (rendererState.allocator)
         rendererState.allocator->destroyBuffers();
 
@@ -639,6 +631,9 @@ void Aquamarine::CDRMBackend::restoreAfterVT() {
         if (!c->crtc || !c->output)
             continue;
 
+        // Another DRM master may have changed the color properties during the VT switch.
+        c->atomic.propsCached         = false;
+        c->crtc->atomic.ctmStateKnown = false;
         auto&                   STATE = c->output->state->state();
 
         SDRMConnectorCommitData data = {
@@ -653,7 +648,6 @@ void Aquamarine::CDRMBackend::restoreAfterVT() {
             .test          = false,
             .enabled       = STATE.enabled,
             .committed     = STATE.committed,
-            .hdrMetadata   = STATE.hdrMetadata,
         };
 
         auto& MODE = STATE.customMode ? STATE.customMode : STATE.mode;
@@ -664,15 +658,10 @@ void Aquamarine::CDRMBackend::restoreAfterVT() {
             continue;
         }
 
-        c->crtc->atomic.ctmStateKnown = false;
-
         if (MODE->modeInfo.has_value())
             data.modeInfo = *MODE->modeInfo;
         else
             data.calculateMode(c);
-
-        if (shouldSubmitCTM(c, STATE, data.modeset))
-            data.ctm = STATE.ctm;
 
         if (STATE.buffer) {
             SP<CDRMFB> drmFB;
@@ -1666,9 +1655,6 @@ bool Aquamarine::SDRMPlane::init(drmModePlane* plane) {
     if (!getDRMPlaneProps(backend->gpu->fd, id, &props))
         return false;
 
-    if (props.values.color_range)
-        getDRMPlaneColorRange(backend->gpu->fd, props.values.color_range, &colorRange);
-
     if (!getDRMProp(backend->gpu->fd, id, props.values.type, &type))
         return false;
 
@@ -1735,6 +1721,13 @@ bool Aquamarine::SDRMPlane::init(drmModePlane* plane) {
             CRTC->cursor = self.lock();
             break;
         }
+    }
+
+    if (props.values.color_range) {
+        const auto range                = getDRMPlaneColorRange(backend->gpu->fd, id, props.values.color_range);
+        colorRange.values.Full_YCbCr    = static_cast<uint32_t>(range.full.value_or(0));
+        colorRange.values.Limited_YCbCr = static_cast<uint32_t>(range.limited.value_or(0));
+        rememberDRMPlaneColorRange(*this, range);
     }
 
     return true;
@@ -2048,7 +2041,8 @@ void Aquamarine::SDRMConnector::connect(drmModeConnector* connector) {
     }
 
     // max_bpc-less retry is per-sink and must not persist across hotplugs.
-    maxBpcFailed = false;
+    maxBpcFailed       = false;
+    atomic.propsCached = false;
 
     backend->backend->log(AQ_LOG_DEBUG, std::format("drm: Connecting connector {}, {}", szName, crtc ? std::format("CRTC ID {}", crtc->id) : "no CRTC"));
 
@@ -2196,7 +2190,10 @@ void Aquamarine::SDRMConnector::disconnect() {
             backend->log(AQ_LOG_ERROR, std::format("drm: Failed to pause commit queue for disconnect of {}", szName));
     }
 
-    status = DRM_MODE_DISCONNECTED;
+    status             = DRM_MODE_DISCONNECTED;
+    atomic.propsCached = false;
+    if (crtc)
+        crtc->atomic.ctmStateKnown = false;
     releaseFBReferences();
 
     output->events.destroy.emit();
@@ -2341,7 +2338,10 @@ void Aquamarine::SDRMConnector::setCRTC(SP<SDRMCRTC> newCRTC) {
         backend->cancelAsyncOutput(output.get(), true);
     invalidateFrame();
 
-    crtc = newCRTC;
+    crtc               = newCRTC;
+    atomic.propsCached = false;
+    if (crtc)
+        crtc->atomic.ctmStateKnown = false;
 }
 
 void Aquamarine::SDRMConnector::onPresent(bool primary, bool cursor, DRMFBList* deferred) {
@@ -2834,11 +2834,6 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
         }
     }
 
-    // The first commit also writes the metadata the compositor didn't touch: the previous DRM master (e.g. a crashed
-    // compositor) may have left HDR signalling behind, which our zero-initialized state doesn't know about.
-    if ((COMMITTED & COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_HDR) || !connector->atomic.propsCached)
-        data.hdrMetadata = STATE.hdrMetadata;
-
     data.blocking  = BLOCKING || formatMismatch;
     data.modeset   = NEEDS_RECONFIG || lastCommitNoBuffer || formatMismatch;
     data.flags     = flags;
@@ -2867,12 +2862,6 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
                 swapchain->rollback();
         }
     }
-
-    // Re-send CTM when it changes, when preserving a non-identity CTM over a modeset,
-    // or when we need one identity blob to clear unknown kernel state from before us.
-    // Once a real CTM commit succeeds, ordinary identity modesets can skip the blob.
-    if (shouldSubmitCTM(connector, STATE, data.modeset))
-        data.ctm = STATE.ctm;
 
     bool ok = connector->commitState(data);
 

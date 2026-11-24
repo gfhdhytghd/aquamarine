@@ -400,8 +400,8 @@ namespace Aquamarine {
         // the current state is invalid and won't commit, don't try to modeset.
         bool commitTainted = false;
 
-        // set when an atomic commit with max_bpc fails; skips max_bpc on future
-        // commits for this connector (works around buggy drivers, e.g. amdgpu eDP).
+        // A successful cap-less retry leaves the applied max bpc unknown.
+        // Skip the rejected cap until the next modeset or a different cap is requested.
         bool                                           maxBpcFailed = false;
 
         Hyprutils::Memory::CSharedPointer<SOutputMode> fallbackMode;
@@ -411,7 +411,7 @@ namespace Aquamarine {
 
             // last connector_state values successfully committed to the kernel. used
             // to skip re-emitting unchanged values on page-flips (see #265).
-            uint64_t          maxBpc      = 0;
+            uint64_t          maxBpc      = 0; // Last requested cap if maxBpcFailed is set.
             uint64_t          colorspace  = 0;
             uint16_t          contentType = 0;
             uint32_t          crtcID      = 0;

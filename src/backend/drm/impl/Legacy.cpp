@@ -85,8 +85,8 @@ bool Aquamarine::CDRMLegacyImpl::commitInternal(Hyprutils::Memory::CSharedPointe
         connector->backend->backend->log(AQ_LOG_DEBUG, std::format("legacy drm: connector {} vrr -> {}", connector->id, STATE.adaptiveSync));
     }
 
-    if ((data.committed & COutputState::AQ_OUTPUT_STATE_GAMMA_LUT) || (data.modeset && enable && connector->output->getGammaSize() > 0)) {
-        const size_t          size = connector->output->getGammaSize();
+    const size_t size = connector->output->getGammaSize();
+    if (size > 0 && ((data.committed & COutputState::AQ_OUTPUT_STATE_GAMMA_LUT) || (data.modeset && enable))) {
         std::vector<uint16_t> red(size), green(size), blue(size);
         for (size_t i = 0; i < size; ++i) {
             // Legacy has no disable operation: an empty ramp restores an identity LUT.

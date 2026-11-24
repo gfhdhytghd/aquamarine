@@ -53,7 +53,13 @@ namespace Aquamarine {
         bool         failed = false;
 
       private:
-        void                                             destroyBlob(uint32_t id);
+        void destroyBlob(uint32_t id);
+        void addConnectorInternal(Hyprutils::Memory::CSharedPointer<SDRMConnector> connector, SDRMConnectorCommitData& data, bool omitMaxBpc);
+
+        void planePropsInternal(const Hyprutils::Memory::CSharedPointer<SDRMPlane>& plane, const Hyprutils::Memory::CSharedPointer<CDRMFB>& fb, uint32_t crtc,
+                                Hyprutils::Math::Vector2D pos, eOutputColorRange colorRange, bool submitRange);
+
+        friend class CDRMAtomicImpl;
 
         Hyprutils::Memory::CWeakPointer<CDRMBackend>     backend;
         drmModeAtomicReq*                                req = nullptr;

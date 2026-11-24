@@ -172,6 +172,13 @@ target_include_directories(colorPipeline PRIVATE "./src/backend/drm")
 target_link_libraries(colorPipeline PRIVATE PkgConfig::deps aquamarine)
 add_test(NAME "colorPipeline" COMMAND colorPipeline)
 add_dependencies(tests colorPipeline)
+add_executable(drmOutput "tests/DRMOutput.cpp")
+target_include_directories(drmOutput PRIVATE "./src/backend/drm" "./src/include")
+# Construct a hardware-free DRM backend for mocked KMS requests.
+target_compile_options(drmOutput PRIVATE -fno-access-control)
+target_link_libraries(drmOutput PRIVATE PkgConfig::deps aquamarine)
+add_test(NAME "drmOutput" COMMAND drmOutput)
+add_dependencies(tests drmOutput)
 
 # Installation
 install(TARGETS aquamarine)

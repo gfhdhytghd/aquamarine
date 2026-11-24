@@ -1,4 +1,6 @@
-#include <aquamarine/backend/DRM.hpp>
+#include <mutex>
+#include <unordered_map>
+#include "Props.hpp"
 
 extern "C" {
 #include <libseat.h>
@@ -79,13 +81,6 @@ static const struct prop_info plane_info[] = {
 #undef INDEX
 };
 
-static const struct prop_info colorrange_info[] = {
-#define INDEX(name) (offsetof(SDRMPlane::UDRMPlaneColorRange, values.name) / sizeof(uint32_t))
-    {.name = "YCbCr full range", .index = INDEX(Full_YCbCr)},
-    {.name = "YCbCr limited range", .index = INDEX(Limited_YCbCr)},
-#undef INDEX
-};
-
 namespace Aquamarine {
 
     static int comparePropInfo(const void* arg1, const void* arg2) {
@@ -113,22 +108,6 @@ namespace Aquamarine {
         }
 
         drmModeFreeObjectProperties(props);
-        return true;
-    }
-
-    static bool scanPropertyEnum(int fd, uint32_t propertyId, uint32_t* result, const prop_info* info, size_t info_len) {
-        drmModePropertyRes* prop = drmModeGetProperty(fd, propertyId);
-        if (!prop)
-            return false;
-
-        for (int i = 0; i < prop->count_enums; ++i) {
-            const prop_info* p = (prop_info*)bsearch(prop->enums[i].name, info, info_len, sizeof(info[0]), comparePropInfo);
-            if (p)
-                result[p->index] = prop->enums[i].value;
-        }
-
-        drmModeFreeProperty(prop);
-
         return true;
     }
 
@@ -167,8 +146,60 @@ namespace Aquamarine {
         return scanProperties(fd, id, DRM_MODE_OBJECT_PLANE, out->props, plane_info, sizeof(plane_info) / sizeof(plane_info[0]));
     }
 
-    bool getDRMPlaneColorRange(int fd, uint32_t id, SDRMPlane::UDRMPlaneColorRange* out) {
-        return scanPropertyEnum(fd, id, out->props, colorrange_info, sizeof(colorrange_info) / sizeof(colorrange_info[0]));
+    std::optional<uint64_t> SDRMPlaneColorRange::select(eOutputColorRange range, bool preferFull) const {
+        const auto baseline = preferFull && full ? full : automatic;
+        if (!baseline || range == AQ_OUTPUT_COLOR_RANGE_AUTO)
+            return baseline;
+        if (range == AQ_OUTPUT_COLOR_RANGE_FULL)
+            return full;
+        if (range == AQ_OUTPUT_COLOR_RANGE_LIMITED)
+            return limited;
+        return std::nullopt;
+    }
+
+    SDRMPlaneColorRange getDRMPlaneColorRange(int fd, uint32_t plane, uint32_t prop) {
+        SDRMPlaneColorRange result;
+        auto                property = drmModeGetProperty(fd, prop);
+        if (!property)
+            return result;
+
+        if (drmModeGetPropertyType(property) == DRM_MODE_PROP_ENUM) {
+            for (int i = 0; i < property->count_enums; ++i) {
+                const auto&            enumValue = property->enums[i];
+                const std::string_view name      = enumValue.name;
+                if (name == "YCbCr full range")
+                    result.full = enumValue.value;
+                else if (name == "YCbCr limited range")
+                    result.limited = enumValue.value;
+            }
+
+            // DRM exposes the current value, so capture the baseline before Aquamarine programs the plane.
+            uint64_t baseline = 0;
+            if (getDRMProp(fd, plane, prop, &baseline))
+                result.automatic = baseline;
+        }
+        drmModeFreeProperty(property);
+        return result;
+    }
+
+    // Keep the discovery state private to the library without changing SDRMPlane's layout.
+    static std::mutex                                                planeColorRangeMutex;
+    static std::unordered_map<const SDRMPlane*, SDRMPlaneColorRange> planeColorRanges;
+
+    void                                                             rememberDRMPlaneColorRange(const SDRMPlane& plane, const SDRMPlaneColorRange& range) {
+        const std::lock_guard lock(planeColorRangeMutex);
+        planeColorRanges.insert_or_assign(&plane, range);
+    }
+
+    SDRMPlaneColorRange rememberedDRMPlaneColorRange(const SDRMPlane& plane) {
+        const std::lock_guard lock(planeColorRangeMutex);
+        const auto            it = planeColorRanges.find(&plane);
+        return it == planeColorRanges.end() ? SDRMPlaneColorRange{} : it->second;
+    }
+
+    void forgetDRMPlaneColorRange(const SDRMPlane& plane) {
+        const std::lock_guard lock(planeColorRangeMutex);
+        planeColorRanges.erase(&plane);
     }
 
     bool getDRMProp(int fd, uint32_t obj, uint32_t prop, uint64_t* ret) {
