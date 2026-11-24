@@ -450,6 +450,9 @@ void Aquamarine::CDRMAtomicRequest::apply(SDRMConnectorCommitData& data) {
         conn->atomic.colorRange = data.outputState.colorRange;
     if (!colorApplied || data.atomic.ctmd)
         conn->crtc->atomic.ctmStateKnown = colorApplied;
+    conn->atomic.vrrEnabled = colorApplied && data.outputState.adaptiveSync;
+    if (conn->output)
+        conn->output->vrrActive = conn->atomic.vrrEnabled;
 }
 
 Aquamarine::CDRMAtomicImpl::CDRMAtomicImpl(Hyprutils::Memory::CSharedPointer<CDRMBackend> backend_) : backend(backend_) {
@@ -470,17 +473,6 @@ CUniquePointer<CDRMAtomicRequest> Aquamarine::CDRMAtomicImpl::prepareAsync(SP<SD
     }
 
     return request;
-}
-
-void Aquamarine::CDRMAtomicImpl::finalizeAsync(CDRMAtomicRequest& request, SP<SDRMConnector> connector, SDRMConnectorCommitData& data, bool success) {
-    if (!success) {
-        request.rollback(data);
-        return;
-    }
-
-    request.apply(data);
-    connector->atomic.vrrEnabled = data.outputState.adaptiveSync;
-    connector->output->vrrActive = data.outputState.adaptiveSync;
 }
 
 bool Aquamarine::CDRMAtomicImpl::prepareConnector(Hyprutils::Memory::CSharedPointer<SDRMConnector> connector, SDRMConnectorCommitData& data) {
